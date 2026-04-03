@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
@@ -7,7 +8,11 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = b.resolveTargetQuery(.{
                 .cpu_arch = .x86_64,
-                .os_tag = .linux,
+                .os_tag = switch (builtin.target.os.tag) {
+                    .linux => .linux,
+                    .macos => .macos,
+                    else => unreachable,
+                },
             }),
         }),
     });
