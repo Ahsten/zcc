@@ -1,16 +1,20 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Lexer = @import("lexer.zig").Lexer;
+const Token = @import("token.zig").Token;
 
-pub fn main() !void {
-    var debug_allocator = std.heap.DebugAllocator(.{}).init;
-    defer _ = debug_allocator.deinit();
-    const gpa = debug_allocator.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try init.minimal.args.toSlice(gpa);
+    defer gpa.free(args);
 
     var filepath: [:0]const u8 = undefined;
     var mode: Mode = undefined;
+    for (args) |arg| {
+        std.log.info("Arg: {s}", .{arg});
+    }
 
     switch (args.len) {
         2 => {
@@ -18,10 +22,10 @@ pub fn main() !void {
             mode = .compile;
         },
         3 => {
-            filepath = args[1];
-            const flag = args[2];
+            const flag = args[1];
             mode = std.meta.stringToEnum(Mode, flag[2..]) orelse
                 return error.UnrecognizedFlag;
+            filepath = args[2];
         },
         else => {
             std.debug.print("\nUsage: ./zcc /path/to/source.c\n", .{});
@@ -34,40 +38,60 @@ pub fn main() !void {
 
     try checkFileExtension(filepath);
 
-    // produce the preprocessed file
     const preprocessed_filename = try replaceFileExtension(gpa, filepath, "i");
     defer gpa.free(preprocessed_filename);
 
-    var child = std.process.Child.init(
-        &.{ "gcc", "-E", "-P", filepath, "-o", preprocessed_filename },
-        gpa,
+    var child = try std.process.spawn(
+        io,
+        .{ .argv = &.{ "gcc", "-E", "-P", filepath, "-o", preprocessed_filename } },
     );
-    const term = try child.spawnAndWait();
-    if (!std.meta.eql(term, .{ .Exited = 0 }))
+    const term = try child.wait(io);
+    if (!std.meta.eql(term, .{ .exited = 0 }))
         return error.PreprocessorFail;
 
-
-    const file_contents = try std.fs.cwd().readFileAlloc(gpa, preprocessed_filename, 10 * 1024 * 1024);
+    const file_contents = try std.Io.Dir.cwd().readFileAllocOptions(
+        io,
+        preprocessed_filename,
+        gpa,
+        .limited(10 * 1024 * 1024),
+        .of(u8),
+        0,
+    );
     defer gpa.free(file_contents);
 
-    try std.fs.cwd().deleteFile(preprocessed_filename);
+    try std.Io.Dir.cwd().deleteFile(io, preprocessed_filename);
 
     const asm_filename = try replaceFileExtension(gpa, filepath, "s");
     defer gpa.free(asm_filename);
 
-    compile(file_contents);
+    try compile(mode, file_contents);
 
     const binary_filename = try removeFileExtension(gpa, filepath);
     defer gpa.free(binary_filename);
-
-    driver(mode);
 }
 
 pub const Mode = enum { lex, parse, codegen, compile, S };
 
-fn driver(mode: Mode) void {
+const TokenList = std.MultiArrayList(struct {
+    tag: Token.Tag,
+    start: u32,
+});
+
+fn driver(mode: Mode, source: [:0]const u8) !void {
     switch (mode) {
-        .lex => {},
+        .lex => {
+            var lexer = Lexer.init(source);
+            while (true) {
+                const token = lexer.next();
+                std.debug.print("{}: {s}\n", .{
+                    token.tag,
+                    source[token.loc.start..token.loc.end],
+                });
+
+                if (token.tag == .invalid) return error.LexerFail;
+                if (token.tag == .eof) break;
+            }
+        },
         .parse => {},
         .codegen => {},
         .S => {},
@@ -75,8 +99,8 @@ fn driver(mode: Mode) void {
     }
 }
 
-fn compile(file_contents: []u8) void {
-    _ = file_contents;
+fn compile(mode: Mode, file_contents: [:0]const u8) !void {
+    try driver(mode, file_contents);
 }
 
 fn assemble_and_link(alloc: Allocator, asm_file: []const u8, output_file: []const u8) !void {
